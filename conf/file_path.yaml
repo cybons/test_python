@@ -1,0 +1,13 @@
+# 組織データのファイルパス
+organization: "../organization*.csv"
+
+# コンフィグ用のパス設定
+conf:
+  # マッピング情報のファイルパス
+  mapping: "../conf/mapping.csv"
+  # 列情報を含むExcelファイルのパス
+  columns: "../columns.xlsx"
+
+# ダウンロードされた組織情報ファイルのパス
+download:
+  org: "../downloaded_organization*.xlsx"
