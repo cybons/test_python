@@ -97,6 +97,54 @@ def extract_columns(
     return tmp_df
 
 
+def identify_differences(
+    left_df: pd.DataFrame, right_df: pd.DataFrame, columns_to_compare: list[str]
+) -> pd.Series:
+    """
+    左右のデータフレームの指定列を比較し、差分がある行を示すマスクを返します。
+    NaN 同士は等価と見なします。
+
+    Args:
+        left_df (pd.DataFrame): 左側のデータフレーム。
+        right_df (pd.DataFrame): 右側のデータフレーム。
+        columns_to_compare (list[str]): 比較対象となる列名のリスト（接尾辞は含まない）。
+
+    Returns:
+        pd.Series: 差分がある行を示すブールマスク。
+    """
+    # 比較対象のカラム名を定義
+    left_cols = [f"{col}_left" for col in columns_to_compare]
+    right_cols = [f"{col}_right" for col in columns_to_compare]
+
+    # 必要な列を抽出
+    left_subset = left_df[left_cols]
+    right_subset = right_df[right_cols]
+
+    # カラム名を揃える
+    right_subset.columns = left_cols
+
+    # NumPy 配列として取得
+    left_values = left_subset.values
+    right_values = right_subset.values
+
+    # 等しい部分のマスク
+    equal_mask = left_values == right_values
+
+    # 両方が NaN である部分のマスク
+    nan_mask = np.isnan(left_values) & np.isnan(right_values)
+
+    # 全ての等しい箇所（通常の等価 + 両方が NaN）のマスク
+    combined_equal = equal_mask | nan_mask
+
+    # 行ごとに全てのカラムが等しいかどうか
+    rows_equal = np.all(combined_equal, axis=1)
+
+    # 差分がある行を示すマスク
+    diff_mask = ~rows_equal
+
+    return pd.Series(diff_mask, index=left_df.index)
+
+
 def identify_changes(
     merged_df: pd.DataFrame,
     columns_to_compare: list[str],
@@ -126,10 +174,9 @@ def identify_changes(
     both_mask = merged_df["_merge"] == "both"
 
     # 比較対象の列が異なるかをチェック
-    diff_mask = (
-        merged_df[[f"{col}_left" for col in columns_to_compare]]
-        != merged_df[[f"{col}_right" for col in columns_to_compare]]
-    ).any(axis=1)
+    diff_mask = identify_differences(
+        left_df=merged_df, right_df=merged_df, columns_to_compare=columns_to_compare
+    )
 
     update_mask = both_mask & diff_mask
     update_df = merged_df[update_mask].copy()
