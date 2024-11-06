@@ -74,8 +74,11 @@ def load_column_config(column_config_file_path: str, sheet_name: str) -> SheetCo
     -------
         SheetConfig: シートの詳細を返す
     """
+
     # 設定ファイルの読み込み
-    config_df = pd.read_excel(column_config_file_path, sheet_name, dtype=str)
+    config_df = pd.read_excel(
+        find_latest_file(column_config_file_path), sheet_name, dtype=str
+    )
 
     # 全列名を取得
     column_names = config_df["列名"].tolist()
@@ -106,7 +109,12 @@ def load_and_prepare_dataframe(
     Returns:
         pd.DataFrame: 前処理を施したデータフレーム
     """
-    df = pd.read_excel(file_path, header=0, names=sheet_config.column_names, dtype=str)
+    df = pd.read_excel(
+        find_latest_file(file_path),
+        header=0,
+        names=sheet_config.column_names,
+        dtype=str,
+    )
 
     # 指定された列を除外
     if sheet_config.drop_cols:
