@@ -5,7 +5,7 @@ from logging import getLogger
 
 import pandas as pd
 import yaml
-from data_model import SheetConfig
+from models.data_model import SheetConfig
 from organization import create_organization
 
 logger = getLogger(__name__)

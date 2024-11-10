@@ -11,6 +11,7 @@ from data_processing import (
     process_usergroup_data,
 )
 from organization import create_organization
+from utils import log_dataframe_info
 
 
 def main():
@@ -44,7 +45,7 @@ def main():
     # mapping_dict = prepare_mapping_table(excel_path=excel_path)
 
     org_data = create_organization(df, df_mapping=df_mapping)
-    print(org_data)
+    log_dataframe_info(org_data, "org_data")
     # ここでローカルファイルを使って4つのマスタデータを作成する
     # DFが3つ出来上がる。
 

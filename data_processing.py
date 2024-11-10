@@ -9,8 +9,8 @@ from data_loader import (
     load_column_config,
     load_dataframe,
 )
-from data_model import SheetConfig
 from data_validation import validate_changes, validate_location_codes
+from models.data_model import SheetConfig
 
 logger = getLogger(__name__)
 

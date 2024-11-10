@@ -336,7 +336,7 @@ def assign_unique_identifier(df_duplicates, G, mapping_dict):
                         G, org_code, next_segment
                     )
 
-                    identifier = next_segment  # デフォルトは組織名
+                    identifier = G.nodes[org_code]["name"]  # デフォルトは組織名
 
                     # マッピングデータに含まれる組織コードを確認
                     for k in mapping_dict:
