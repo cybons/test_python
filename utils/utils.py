@@ -1,4 +1,5 @@
 import os
+import unicodedata
 from datetime import datetime
 
 from openpyxl import Workbook
@@ -74,3 +75,36 @@ def save_dfs_to_excel_with_tables(
     # ワークブックを保存
     wb.save(file_path)
     return file_path
+
+
+def is_fullwidth_kana_or_symbol(char):
+    # Unicodeカテゴリを取得
+    category = unicodedata.category(char)
+    # Unicode名称を取得
+    name = unicodedata.name(char, "")
+
+    # 全角カナの範囲を確認
+    if "\u30a0" <= char <= "\u30ff":
+        return True
+    # 半角カナの範囲を確認
+    if "\uff66" <= char <= "\uff9d":
+        return True
+    # 半角中点を確認
+    if char == "\uff65":
+        return True
+    # 全角中点を確認
+    if char == "\u30fb":
+        return True
+    # その他の全角記号を必要に応じて追加
+    return False
+
+
+def contains_fullwidth_kana_or_symbols(text):
+    return any(is_fullwidth_kana_or_symbol(char) for char in text)
+
+
+text1 = "これはテストです。・ｶﾅ"
+text2 = "This is a test."
+
+print(contains_fullwidth_kana_or_symbols(text1))  # True
+print(contains_fullwidth_kana_or_symbols(text2))  # False
