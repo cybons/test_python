@@ -1,0 +1,557 @@
+import logging
+import multiprocessing
+import operator
+
+import numpy as np
+import pandas as pd
+from joblib import Parallel, delayed
+
+ORG_FULL_NAME = "org_full_name"
+ORG_HIERARCHY_X = "org_hierarchy_x"
+ORG_HIERARCHY_Y = "org_hierarchy_y"
+OPERATOR_MAPPING = {
+    "以上": operator.ge,
+    "より大きい": operator.gt,
+    "以下": operator.le,
+    "より小さい": operator.lt,
+    "等しい": operator.eq,
+    "等しくない": operator.ne,
+}
+OTHER_LABEL = "その他"
+
+SUPPORTED_OPERATORS = set(OPERATOR_MAPPING.keys())
+
+# ログの設定
+logging.basicConfig(level=logging.INFO)
+
+
+def split_org_hierarchy(df, full_name_col="group_full_name"):
+    """
+    組織のフルネームを階層ごとに分割し、新しい列を追加します。
+
+    Parameters:
+    - df: pandas.DataFrame - 組織情報を含むデータフレーム
+    - full_name_col: str - 組織のフルネームを含む列の名前
+
+    Returns:
+    - df: pandas.DataFrame - 階層ごとの列が追加されたデータフレーム
+    """
+    # 最大階層数を取得
+    max_rank = df[full_name_col].str.count("/").max() + 1
+
+    # 階層ごとに列を追加
+    for rank in range(1, max_rank + 1):
+        col_name = f"group_full_name_rank{rank}"
+        df[col_name] = df[full_name_col].apply(
+            lambda x: "/".join(x.split("/")[:rank]) if pd.notnull(x) else None
+        )
+
+    return df
+
+
+def preprocess_user_df(user_df):
+    """
+    ユーザーデータフレームを前処理し、各ユーザーが所属するgroup_full_nameごとに行を分割します。
+    """
+    # group列をカンマで分割
+    user_df["group_list"] = user_df["group"].str.split(",")
+
+    # エクスプロードして各ユーザーが所属するグループごとに行を複製
+    user_exploded = user_df.explode("group_list")
+
+    # 前後のスペースを削除
+    user_exploded["group_list"] = user_exploded["group_list"].str.strip()
+
+    print(user_exploded)
+
+    # 必要な列のみ抽出し、列名を変更
+    return user_exploded[["user_code", "group_list"]].rename(
+        columns={"group_list": "group_full_name"}
+    )
+
+
+def explode_hierarchical_orgs(df, org_col=ORG_FULL_NAME):
+    """
+    組織名を階層ごとに分割し、エクスプロードされたデータフレームを返します。
+
+    Parameters:
+    - df: pandas.DataFrame - ユーザーと組織情報が含まれるデータフレーム
+    - org_col: str - 組織名を含む列の名前
+
+
+    Returns:
+    - exploded_df: pandas.DataFrame - エクスプロードされたデータフレーム
+    """
+    # 組織名をスラッシュで分割し、階層ごとの組織名リストを生成
+    org_hierarchy_series = (
+        df[org_col]
+        .str.split("/")
+        .apply(lambda parts: ["/".join(parts[:i]) for i in range(1, len(parts) + 1)])
+    )
+
+    # エクスプロードして階層ごとに行を複製
+    exploded_df = df.assign(org_hierarchy=org_hierarchy_series).explode("org_hierarchy")
+
+    # 必要な列のみ抽出
+    exploded_df = exploded_df[["user_code", "org_hierarchy"]]
+
+    # 列名を変更
+    # exploded_df = exploded_df.rename(columns={org_col: "original_org_full_name"})
+
+    return exploded_df
+
+
+def aggregate_users_per_org(exploded_df, org_col="org_hierarchy", user_col="user_code"):
+    """
+    エクスプロードされたデータフレームを基に、組織ごとにユーザーを集計します。
+
+    Parameters:
+    - exploded_df: pandas.DataFrame - エクスプロードされたデータフレーム
+    - org_col: str - 組織階層名を含む列の名前
+    - user_col: str - ユーザーコードを含む列の名前
+
+    Returns:
+    - org_to_users: pandas.DataFrame - org_full_name、user_set、num_usersを含むデータフレーム
+    """
+    # グループごとにユーザーセットを集約
+    org_to_users = exploded_df.groupby(org_col)[user_col].agg(set).reset_index()
+
+    # 列名を変更
+    org_to_users.rename(
+        columns={org_col: ORG_FULL_NAME, user_col: "user_set"}, inplace=True
+    )
+
+    # num_users列を追加
+    org_to_users["num_users"] = org_to_users["user_set"].str.len()
+
+    return org_to_users
+
+
+# 類似度指標を計算する関数
+def calculate_similarity_metrics(row):
+    intersection_size = row["intersection_size"]
+    num_users_df1 = row["num_users_df1"]
+    num_users_df2 = row["num_users_df2"]
+
+    # ジャッカード指数
+    union_size = num_users_df1 + num_users_df2 - intersection_size
+    jaccard_index = intersection_size / union_size if union_size != 0 else 0
+
+    # コサイン類似度
+    cosine_similarity = (
+        intersection_size / (num_users_df1**0.5 * num_users_df2**0.5)
+        if (num_users_df1 > 0 and num_users_df2 > 0)
+        else 0
+    )
+
+    # ソレンセン・ディケッタ指数
+    sorensen_dice = (
+        (2 * intersection_size) / (num_users_df1 + num_users_df2)
+        if (num_users_df1 + num_users_df2) > 0
+        else 0
+    )
+
+    # オーバーラップ係数
+    min_size = min(num_users_df1, num_users_df2)
+    overlap_coefficient = intersection_size / min_size if min_size > 0 else 0
+
+    return {
+        "jaccard_index": jaccard_index,
+        "cosine_similarity": cosine_similarity,
+        "sorensen_dice": sorensen_dice,
+        "overlap_coefficient": overlap_coefficient,
+    }
+
+
+def generate_org_pairs(exploded_df1, exploded_df2, user_col="user_code"):
+    """
+    df1とdf2のエクスプロードされたデータフレームをマージし、組織ペアごとの共通ユーザー数をカウントします。
+
+    Parameters:
+    - exploded_df1: pandas.DataFrame - df1のエクスプロードされたデータフレーム
+    - exploded_df2: pandas.DataFrame - df2のエクスプロードされたデータフレーム
+    - user_col: str - ユーザーコードを含む列の名前
+
+    Returns:
+    - intersection: pandas.DataFrame - org_hierarchy_df1、org_hierarchy_df2、intersection_sizeを含むデータフレーム
+    """
+
+    # ユーザーごとに所属する組織のペアを生成
+    user_orgs = pd.merge(exploded_df1, exploded_df2, how="inner", on=user_col)
+
+    # 組織ペアごとの共通ユーザー数をカウント
+    intersection = (
+        user_orgs.groupby([ORG_HIERARCHY_X, ORG_HIERARCHY_Y])
+        .size()
+        .reset_index(name="intersection_size")
+    )
+
+    return intersection
+
+
+def merge_user_counts(intersection, aggregated_df1, aggregated_df2):
+    """
+    組織ペアごとの共通ユーザー数に、各組織の総ユーザー数を結合します。
+
+    Parameters:
+    - intersection: pandas.DataFrame - org_hierarchy_df1、org_hierarchy_df2、intersection_sizeを含むデータフレーム
+    - aggregated_df1: pandas.DataFrame - org_full_name、user_set、num_usersを含むdf1の集計データフレーム
+    - aggregated_df2: pandas.DataFrame - org_full_name、user_set、num_usersを含むdf2の集計データフレーム
+
+    Returns:
+    - jaccard_df: pandas.DataFrame - org_hierarchy_df1、org_hierarchy_df2、intersection_size、num_users_df1、num_users_df2を含むデータフレーム
+    """
+    jaccard_df = (
+        intersection.merge(
+            aggregated_df1[["org_full_name", "num_users"]],
+            left_on=ORG_HIERARCHY_X,
+            right_on="org_full_name",
+            how="left",
+        )
+        .rename(columns={"num_users": "num_users_df1"})
+        .drop(columns=["org_full_name"])
+    )
+
+    jaccard_df = (
+        jaccard_df.merge(
+            aggregated_df2[["org_full_name", "num_users"]],
+            left_on=ORG_HIERARCHY_Y,
+            right_on="org_full_name",
+            how="left",
+        )
+        .rename(columns={"num_users": "num_users_df2"})
+        .drop(columns=["org_full_name"])
+    )
+
+    return jaccard_df
+
+
+# 類似度指標を計算する関数（NumPy を活用）
+def calculate_similarity_metrics_numpy(jaccard_df):
+    """
+    NumPy を活用して類似度指標をベクトル化された操作で計算します。
+    """
+    intersection_size = jaccard_df["intersection_size"].values
+    num_users_df1 = jaccard_df["num_users_df1"].values
+    num_users_df2 = jaccard_df["num_users_df2"].values
+
+    # ジャッカード指数
+    union_size = num_users_df1 + num_users_df2 - intersection_size
+    jaccard_index = np.divide(
+        intersection_size,
+        union_size,
+        out=np.zeros_like(intersection_size, dtype=float),
+        where=union_size != 0,
+    )
+
+    # コサイン類似度
+    cosine_similarity = np.divide(
+        intersection_size,
+        np.sqrt(num_users_df1) * np.sqrt(num_users_df2),
+        out=np.zeros_like(intersection_size, dtype=float),
+        where=(num_users_df1 > 0) & (num_users_df2 > 0),
+    )
+
+    # ソレンセン・ディケッタ指数
+    sorensen_dice = np.divide(
+        2 * intersection_size,
+        num_users_df1 + num_users_df2,
+        out=np.zeros_like(intersection_size, dtype=float),
+        where=(num_users_df1 + num_users_df2) > 0,
+    )
+
+    # オーバーラップ係数
+    min_size = np.minimum(num_users_df1, num_users_df2)
+    overlap_coefficient = np.divide(
+        intersection_size,
+        min_size,
+        out=np.zeros_like(intersection_size, dtype=float),
+        where=min_size > 0,
+    )
+
+    # 所属割合
+    membership_ratio = np.divide(
+        intersection_size,
+        (num_users_df1 + num_users_df2) / 2,
+        out=np.zeros_like(intersection_size, dtype=float),
+        where=((num_users_df1 + num_users_df2) / 2) != 0,
+    )
+
+    # データフレームに追加
+    jaccard_df = jaccard_df.copy()
+    jaccard_df["jaccard_index"] = jaccard_index
+    jaccard_df["cosine_similarity"] = cosine_similarity
+    jaccard_df["sorensen_dice"] = sorensen_dice
+    jaccard_df["overlap_coefficient"] = overlap_coefficient
+    jaccard_df["membership_ratio"] = membership_ratio
+
+    return jaccard_df
+
+
+def load_and_validate_conditions(excel_path):
+    """
+    Excelファイルからフィルタリング条件を読み込み、演算子のバリデーションを行います。
+    複数の条件がある場合は、各条件を個別の行として処理します。
+    """
+    conditions_df = pd.read_excel(excel_path)
+
+    # 必須列の確認
+    required_columns = [
+        "Condition ID",
+        "Similarity Index",
+        "Operator",
+        "Group Min Users",
+        "Group Max Users",
+        "Column",
+        "Value",
+        "Description",
+    ]
+    missing_columns = set(required_columns) - set(conditions_df.columns)
+    if missing_columns:
+        raise ValueError(f"Missing required columns in Excel file: {missing_columns}")
+
+    # 演算子のバリデーション
+    invalid_operators = set(conditions_df["Operator"].dropna()) - SUPPORTED_OPERATORS
+    if invalid_operators:
+        raise ValueError(
+            f"Unsupported operators found in Excel file: {invalid_operators}"
+        )
+
+    return conditions_df
+
+
+def apply_condition(filtered_df, condition_row, matched_conditions_series):
+    """
+    単一の条件をDataFrameに適用し、'is_high_similarity' を設定します。
+    マッチした条件のCondition IDを'matched_conditions_series'に記録します。
+    """
+    similarity_index = condition_row["Similarity Index"]
+    operator_str = condition_row["Operator"]
+    group_min_users = condition_row["Group Min Users"]
+    group_max_users = condition_row["Group Max Users"]
+    column = condition_row["Column"]
+    value = condition_row["Value"]
+    condition_id = condition_row["Condition ID"]
+
+    # 条件の初期化
+    condition = pd.Series([True] * len(filtered_df), index=filtered_df.index)
+
+    # グループの最小ユーザー数の条件
+    if not pd.isna(group_min_users):
+        condition &= (filtered_df["num_users_df1"] >= group_min_users) & (
+            filtered_df["num_users_df2"] >= group_min_users
+        )
+
+    # グループの最大ユーザー数の条件
+    if not pd.isna(group_max_users):
+        condition &= (filtered_df["num_users_df1"] <= group_max_users) & (
+            filtered_df["num_users_df2"] <= group_max_users
+        )
+
+    # 類似度指標の条件
+    if not pd.isna(similarity_index) and not pd.isna(operator_str):
+        op_func = OPERATOR_MAPPING.get(operator_str)
+        condition &= op_func(filtered_df[similarity_index], value)
+
+    # 追加条件（Column と Value）の適用
+    if not pd.isna(column) and not pd.isna(value):
+        # 追加条件も同じ演算子を使用
+        op_func_add = OPERATOR_MAPPING.get(operator_str)
+        condition &= op_func_add(filtered_df[column], value)
+
+    # 条件を満たす行に対して 'is_high_similarity' を True に設定し、Condition IDを記録
+    matched_indices = filtered_df[condition].index
+    filtered_df.loc[matched_indices, "is_high_similarity"] = True
+
+    # 'matched_conditions' 列にCondition IDを追加
+    for idx in matched_indices:
+        if pd.isna(matched_conditions_series.at[idx]):
+            matched_conditions_series.at[idx] = [condition_id]
+        else:
+            matched_conditions_series.at[idx].append(condition_id)
+
+
+def set_exclude_flags(df):
+    """
+    高類似度ペアが存在する場合、同じ組織名の他のペアを 'exclude=True' に設定します。
+    """
+    high_similarity_pairs = df[df["is_high_similarity"]]
+
+    if not high_similarity_pairs.empty:
+        # 高類似度ペアに含まれる組織名を抽出
+        orgs_to_exclude = pd.unique(
+            high_similarity_pairs[
+                ["df1_org_full_name", "df2_org_full_name"]
+            ].values.ravel("K")
+        )
+
+        # 高類似度ペア自体のインデックス
+        high_similarity_indices = high_similarity_pairs.index
+
+        # 'exclude=True' を設定（高類似度ペア自体を除く）
+        df.loc[
+            (
+                df["df1_org_full_name"].isin(orgs_to_exclude)
+                | df["df2_org_full_name"].isin(orgs_to_exclude)
+            )
+            & (~df.index.isin(high_similarity_indices)),
+            "exclude",
+        ] = True
+
+
+def apply_filtering_conditions_from_excel(df, excel_path):
+    """
+    Excelファイルからフィルタリング条件を読み込み、'exclude' と 'is_high_similarity' 列を追加します。
+    'exclude' 列はフィルタリングせずに全てのペアに対して設定します。
+    'matched_conditions' 列には、'is_high_similarity=True' となった際にマッチした条件のIDをリストとして記録します。
+    """
+    # フィルタリング条件の読み込みとバリデーション
+    conditions_df = load_and_validate_conditions(excel_path)
+
+    # 初期化
+    df["exclude"] = False
+    df["is_high_similarity"] = False
+    df["matched_conditions"] = pd.Series([[] for _ in range(len(df))], index=df.index)
+
+    # ユーザー数が3人未満のペアを除外
+    df.loc[(df["num_users_df1"] < 3) | (df["num_users_df2"] < 3), "exclude"] = True
+
+    # フィルタリング対象のペアのみを対象とする
+    filtered_df = df[~df["exclude"]].copy()
+
+    # 'matched_conditions' の参照を取得
+    matched_conditions_series = df.loc[filtered_df.index, "matched_conditions"]
+
+    # 各条件を適用
+    for _, row in conditions_df.iterrows():
+        apply_condition(filtered_df, row, matched_conditions_series)
+
+    # 'is_high_similarity' と 'matched_conditions' を元の DataFrame にマージ
+    df["is_high_similarity"] = filtered_df["is_high_similarity"]
+    df["matched_conditions"] = filtered_df["matched_conditions"]
+
+    # 高類似度ペアに基づき 'exclude=True' を設定
+    set_exclude_flags(df)
+
+    return df
+
+
+def compute_similarity_metrics_with_rank(jaccard_df, num_cores=None):
+    """
+    類似度指標を計算し、ランクを追加したデータフレームを返します。
+
+    Parameters:
+    - jaccard_df: pandas.DataFrame - 組織ペアごとのユーザー数データフレーム
+    - num_cores: int, optional - 使用するコア数。デフォルトは CPU コア数 - 1
+
+    Returns:
+    - similarity_metrics_df: pandas.DataFrame - 類似度指標とランクを含むデータフレーム
+    """
+    if num_cores is None:
+        num_cores = multiprocessing.cpu_count() - 1  # 使用するコア数を調整
+
+    similarity_metrics_chunks = Parallel(n_jobs=num_cores)(
+        delayed(calculate_similarity_metrics_numpy)(chunk)
+        for chunk in np.array_split(jaccard_df, num_cores)
+    )
+
+    # データフレームに結合
+    similarity_metrics_df = pd.concat(similarity_metrics_chunks)
+
+    # 組織名が同じかどうかのフラグを追加
+    similarity_metrics_df["same_org_name"] = (
+        similarity_metrics_df[ORG_HIERARCHY_X] == similarity_metrics_df[ORG_HIERARCHY_Y]
+    )
+
+    # ランクを追加
+    similarity_metrics_df["org_rank_df1"] = (
+        similarity_metrics_df[ORG_HIERARCHY_X].str.count("/") + 1
+    )
+    similarity_metrics_df["org_rank_df2"] = (
+        similarity_metrics_df[ORG_HIERARCHY_Y].str.count("/") + 1
+    )
+
+    similarity_metrics_df["rank_difference"] = (
+        similarity_metrics_df["org_rank_df1"] - similarity_metrics_df["org_rank_df2"]
+    ).abs()
+
+    return similarity_metrics_df
+
+
+def main():
+    # サンプルデータの作成（実際のデータを使用してください）
+    data1 = {
+        ORG_FULL_NAME: [
+            "Company/Sales",
+            "Company/Sales",
+            "Company/Engineering/Software",
+            "Company/Engineering/Hardware",
+            "Company/HR",
+        ],
+        "user_code": ["U1", "U2", "U3", "U4", "U5"],
+    }
+
+    data2 = {
+        ORG_FULL_NAME: [
+            "Company/Sales",
+            "Company/Engineering/Software",
+            "Company/HR",
+            "Company/Marketing",
+        ],
+        "user_code": ["U2", "U3", "U5", "U6"],
+    }
+
+    df1 = pd.DataFrame(data1)
+    df2 = pd.DataFrame(data2)
+
+    # データ型の最適化
+    df1[ORG_FULL_NAME] = df1[ORG_FULL_NAME].astype("category")
+    df2[ORG_FULL_NAME] = df2[ORG_FULL_NAME].astype("category")
+
+    # df1の処理
+    exploded_df1 = explode_hierarchical_orgs(df1)
+    aggregated_df1 = aggregate_users_per_org(exploded_df1)
+
+    # df2の処理
+    exploded_df2 = explode_hierarchical_orgs(df2)
+    aggregated_df2 = aggregate_users_per_org(exploded_df2)
+
+    intersection = generate_org_pairs(exploded_df1, exploded_df2)
+
+    # 組織ペアごとのユーザー数を結合
+    jaccard_df = merge_user_counts(intersection, aggregated_df1, aggregated_df2)
+
+    # 並列処理を用いたジャッカード指数および追加の類似度指標の計算
+    num_cores = multiprocessing.cpu_count() - 1  # 使用するコア数を調整
+    final_all_similarity_metrics_df = compute_similarity_metrics_with_rank(
+        jaccard_df, num_cores
+    )
+
+    # 必要な列を選択し、名前を変更
+    # final_all_similarity_metrics_df = similarity_metrics_df[
+    #     [
+    #         ORG_HIERARCHY_X,
+    #         ORG_HIERARCHY_Y,
+    #         "intersection_size",
+    #         "num_users_df1",
+    #         "num_users_df2",
+    #         "jaccard_index",
+    #         "cosine_similarity",
+    #         "sorensen_dice",
+    #         "overlap_coefficient",
+    #         "same_org_name",
+    #     ]
+    # ]
+
+    print("\n全ての組織ペアのジャッカード指数および追加の類似度指標:")
+    print(final_all_similarity_metrics_df)
+
+    # データの出力
+    final_all_similarity_metrics_df.to_csv("all_similarity_metrics.csv", index=False)
+    final_all_similarity_metrics_df.to_json(
+        "all_similarity_metrics.json", orient="records", force_ascii=False
+    )
+
+
+if __name__ == "__main__":
+    main()
