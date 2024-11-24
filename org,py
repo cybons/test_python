@@ -3,6 +3,7 @@ import logging
 import pandas as pd
 
 from organization.constants import ORG_FULL_NAME
+from organization.filtering import OrganizationFilter
 from organization.hierarchy import OrganizationHierarchy
 from organization.similarity import OrganizationSimilarityAnalyzer
 
@@ -70,12 +71,13 @@ def main():
 
     data2 = {
         ORG_FULL_NAME: [
+            "Company/Engineering/Hardware",
             "Company/Sales",
             "Company/Engineering/Software",
             "Company/HR",
             "Company/Marketing",
         ],
-        "user_code": ["U2", "U3", "U5", "U6"],
+        "user_code": ["U1", "U2", "U3", "U5", "U6"],
     }
 
     df1 = pd.DataFrame(data1)
@@ -93,7 +95,14 @@ def main():
     # 類似度分析
     analyzer = OrganizationSimilarityAnalyzer(hierarchy1, hierarchy2)
     final_all_similarity_metrics_df = analyzer.compute_similarities()
+    filter_instance = OrganizationFilter(
+        final_all_similarity_metrics_df, "condition.xlsx"
+    )
+    filter_df = filter_instance.apply_filters()
 
+    # Excelへの出力
+    output_path = "filtered_results.xlsx"
+    filter_instance.export_to_excel(output_path)
     # 必要な列を選択し、名前を変更
     # final_all_similarity_metrics_df = similarity_metrics_df[
     #     [
@@ -111,7 +120,7 @@ def main():
     # ]
 
     print("\n全ての組織ペアのジャッカード指数および追加の類似度指標:")
-    print(final_all_similarity_metrics_df)
+    print(filter_df)
 
     # データの出力
     # final_all_similarity_metrics_df.to_csv("all_similarity_metrics.csv", index=False)

@@ -3,24 +3,34 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from .constants import OPERATOR_MAPPING
+from .constants import OPERATOR_MAPPING, ORG_HIERARCHY_X, ORG_HIERARCHY_Y
 
 
 @dataclass
 class FilterCondition:
     """フィルタリング条件を表すデータクラス
 
-    Returns:
-        _type_: _description_
+    Attributes:
+        condition_id (str): 条件の一意識別子
+        similarity_index (str): 類似度指標の名前
+        operator (str): 演算子（例: '>', '<', '==', etc.）
+        group_min_users (Optional[int]): グループの最小ユーザー数
+        group_max_users (Optional[int]): グループの最大ユーザー数
+        value (Union[float, int]): フィルタリングに使用する値
+        description (str): 条件の説明
     """
 
     condition_id: str  # 条件の一意識別子
-    similarity_index: Optional[str]  # 類似度指標の名前
+    similarity_index: str  # 類似度指標の名前
     operator: str  # 演算子（例: '>', '<', '==', etc.）
     group_min_users: Optional[int]  # グループの最小ユーザー数
     group_max_users: Optional[int]  # グループの最大ユーザー数
-    column: str  # フィルタリング対象の列名
     value: Union[float, int]  # フィルタリングに使用する値
     description: str  # 条件の説明
 
@@ -29,9 +39,7 @@ class FilterCondition:
         """pandas.Seriesからフィルタリング条件を生成"""
         return cls(
             condition_id=series["Condition ID"],
-            similarity_index=series["Similarity Index"]
-            if pd.notna(series["Similarity Index"])
-            else None,
+            similarity_index=series["Similarity Index"],
             operator=series["Operator"],
             group_min_users=series["Group Min Users"]
             if pd.notna(series["Group Min Users"])
@@ -39,7 +47,6 @@ class FilterCondition:
             group_max_users=series["Group Max Users"]
             if pd.notna(series["Group Max Users"])
             else None,
-            column=series["Column"] if pd.notna(series["Column"]) else None,
             value=series["Value"],
             description=series["Description"],
         )
@@ -78,7 +85,7 @@ class OrganizationFilter:
             self._apply_basic_filters()
 
             # フィルタリング対象のデータを取得
-            filtered_df = self.similarity_df[~self.similarity_df["exclude"]].copy()
+            filtered_df = self.similarity_df[~self.similarity_df["is_excluded"]].copy()
 
             # 各条件を適用
             for condition in conditions:
@@ -86,6 +93,12 @@ class OrganizationFilter:
 
             # 高類似度ペアに基づく除外フラグの設定
             self._set_exclude_flags()
+
+            # needs_review フラグを設定
+            self.similarity_df["needs_review"] = (
+                ~self.similarity_df["is_excluded"]
+                & ~self.similarity_df["is_high_similarity"]
+            )
 
             return self.similarity_df
 
@@ -111,7 +124,6 @@ class OrganizationFilter:
                 "Operator",
                 "Group Min Users",
                 "Group Max Users",
-                "Column",
                 "Value",
                 "Description",
             }
@@ -137,18 +149,16 @@ class OrganizationFilter:
 
     def _initialize_filter_columns(self) -> None:
         """フィルタリング用の列を初期化"""
-        self.similarity_df["exclude"] = False  # 除外フラグの初期化
+        self.similarity_df["is_excluded"] = False  # 除外フラグの初期化
         self.similarity_df["is_high_similarity"] = False  # 高類似度フラグの初期化
-        self.similarity_df["matched_conditions"] = [
-            [] for _ in range(len(self.similarity_df))
-        ]  # マッチした条件のリストを初
+        self.similarity_df["matched_condition"] = ""
 
     def _apply_basic_filters(self) -> None:
         """基本的なフィルタリングを適用（ユーザー数が3人未満のペアを除外）"""
         self.similarity_df.loc[
             (self.similarity_df["num_users_df1"] < 3)
             | (self.similarity_df["num_users_df2"] < 3),
-            "exclude",
+            "is_excluded",
         ] = True  # ユーザー数が3未満の行に除外フラグを設定
 
     def _apply_condition(
@@ -157,9 +167,9 @@ class OrganizationFilter:
         """
         単一の条件をDataFrameに適用
 
-        Excelファイルからフィルタリング条件を読み込み、'exclude' と 'is_high_similarity' 列を追加します。
-        'exclude' 列はフィルタリングせずに全てのペアに対して設定します。
-        'matched_conditions' 列には、'is_high_similarity=True' となった際にマッチした条件のIDをリストとして記録します。
+        Excelファイルからフィルタリング条件を読み込み、'is_excluded' と 'is_high_similarity' 列を追加します。
+        'is_excluded' 列はフィルタリングせずに全てのペアに対して設定します。
+        'matched_condition' 列には、'is_high_similarity=True' となった際にマッチした条件を記録します。
 
         Parameters:
             filtered_df (pd.DataFrame): フィルタリング対象のDataFrame
@@ -185,11 +195,6 @@ class OrganizationFilter:
             op_func = OPERATOR_MAPPING[condition.operator]
             mask &= op_func(filtered_df[condition.similarity_index], condition.value)
 
-        # 追加条件の適用
-        if condition.column is not None:
-            op_func = OPERATOR_MAPPING[condition.operator]
-            mask &= op_func(filtered_df[condition.column], condition.value)
-
         # 条件を満たす行のインデックスを取得
         matched_indices = filtered_df[mask].index
 
@@ -198,17 +203,12 @@ class OrganizationFilter:
 
         # matched_conditionsの更新
         for idx in matched_indices:
-            if isinstance(self.similarity_df.at[idx, "matched_conditions"], list):
-                self.similarity_df.at[idx, "matched_conditions"].append(
-                    condition.condition_id
-                )
-            else:
-                self.similarity_df.at[idx, "matched_conditions"] = [
-                    condition.condition_id
-                ]
+            self.similarity_df.at[idx, "matched_condition"] = condition.description
+
+        filtered_df.drop(matched_indices, inplace=True)
 
     def _set_exclude_flags(self) -> None:
-        """高類似度ペアが存在する場合、同じ組織名の他のペアをexclude=Trueに設定"""
+        """高類似度ペアが存在する場合、同じ組織名の他のペアをis_excluded=Trueに設定"""
         high_similarity_pairs = self.similarity_df[
             self.similarity_df["is_high_similarity"]
         ]
@@ -216,12 +216,16 @@ class OrganizationFilter:
         if not high_similarity_pairs.empty:
 
             def set_flags(org_column: str):
-                """指定された組織名列に基づいて除外フラグを設定するヘルパー関数"""
+                """指定された組織名列に基づいて除外フラグを設定するヘルパー関数
+
+                Parameters:
+                    org_column (str): 組織名の列名（例: 'df1_org_full_name'）
+                """
                 orgs_to_exclude = pd.unique(high_similarity_pairs[org_column])
                 self.similarity_df.loc[
                     (self.similarity_df[org_column].isin(orgs_to_exclude))
                     & (~self.similarity_df.index.isin(high_similarity_indices)),
-                    "exclude",
+                    "is_excluded",
                 ] = True
 
             high_similarity_indices = (
@@ -229,7 +233,107 @@ class OrganizationFilter:
             )  # 高類似度ペア自体のインデックスを取得
 
             # df1_org_full_nameに基づく除外フラグの設定
-            set_flags("df1_org_full_name")
+            set_flags(ORG_HIERARCHY_X)
 
             # df2_org_full_nameに基づく除外フラグの設定
-            set_flags("df2_org_full_name")
+            set_flags(ORG_HIERARCHY_Y)
+
+    def export_to_excel(self, output_path: str):
+        """フィルタリング結果をExcelファイルに出力する
+
+        Parameters:
+            output_path (str): 出力するExcelファイルのパス
+        """
+        # 新しいワークブックを作成
+        wb = Workbook()
+
+        # テーブルスタイルの定義（薄いスタイル）
+        table_style = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+
+        # 'All_Data' シートを取得（デフォルトでアクティブなシート）
+        ws_all = wb.active
+        ws_all.title = "All_Data"
+
+        # self.similarity_df を 'All_Data' シートに書き込む（ヘッダーを1行目に）
+        for r_idx, row in enumerate(
+            dataframe_to_rows(self.similarity_df, index=False, header=True), 1
+        ):
+            for c_idx, value in enumerate(row, 1):
+                ws_all.cell(row=r_idx, column=c_idx, value=value)
+
+        # テーブル範囲を定義
+        max_row, max_col = self.similarity_df.shape
+        table_ref = (
+            f"A1:{get_column_letter(max_col)}{max_row + 1}"  # +1 はヘッダー行を含むため
+        )
+
+        # テーブルを作成してシートに追加
+        tab_all = Table(
+            displayName="All_Data_Table", ref=table_ref, tableStyleInfo=table_style
+        )
+        ws_all.add_table(tab_all)
+
+        # needs_review_df を抽出
+        needs_review_df = self.similarity_df[self.similarity_df["needs_review"]]
+
+        # 'Needs_Review' シートを作成
+        ws_review = wb.create_sheet(title="Needs_Review")
+
+        if not needs_review_df.empty:
+            # needs_review_df を 'Needs_Review' シートに書き込む（ヘッダーを1行目に）
+            for r_idx, row in enumerate(
+                dataframe_to_rows(needs_review_df, index=False, header=True), 1
+            ):
+                for c_idx, value in enumerate(row, 1):
+                    ws_review.cell(row=r_idx, column=c_idx, value=value)
+
+            # テーブル範囲を定義
+            nr_max_row, nr_max_col = needs_review_df.shape
+            table_ref_review = f"A1:{get_column_letter(nr_max_col)}{nr_max_row + 1}"  # +1 はヘッダー行を含むため
+
+            # テーブルを作成してシートに追加
+            tab_review = Table(
+                displayName="Needs_Review_Table",
+                ref=table_ref_review,
+                tableStyleInfo=table_style,
+            )
+            ws_review.add_table(tab_review)
+        else:
+            # データがない場合、A1にメッセージを入力
+            msg = "対象データはありませんでした"
+            ws_review["A1"] = msg
+            # メッセージを強調表示（フォントサイズを大きくするなど）
+            ws_review["A1"].font = Font(bold=True, size=14)
+
+        # 自動幅調整関数の定義
+        def auto_adjust_column_width(sheet, dataframe):
+            for idx, col in enumerate(dataframe.columns, 1):
+                column_letter = get_column_letter(idx)
+                try:
+                    max_length = (
+                        max(dataframe[col].astype(str).map(len).max(), len(col)) + 2
+                    )  # 余白を追加
+                except ValueError:
+                    max_length = len(col) + 2
+                sheet.column_dimensions[column_letter].width = max_length
+
+        # 'All_Data' シートの列幅を調整
+        auto_adjust_column_width(ws_all, self.similarity_df)
+
+        # 'Needs_Review' シートの列幅を調整
+        if not needs_review_df.empty:
+            auto_adjust_column_width(ws_review, needs_review_df)
+        else:
+            # データがない場合、A列の幅をメッセージに合わせて調整
+            ws_review.column_dimensions["A"].width = (
+                len("対象データはありませんでした") + 2
+            )
+
+        # Excelファイルを保存
+        wb.save(output_path)
