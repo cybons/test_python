@@ -188,3 +188,52 @@ function onOpen() {
     .addItem('バッチリストを作成', 'createBatchList')
     .addToUi();
 }
+
+
+/**
+ * 開始時間と終了時間の差分を「HH:mm」形式で返す関数
+ * @param {string} startTime - 開始時間（例: "14:00"）
+ * @param {string} endTime - 終了時間（例: "15:00"）
+ * @returns {string} - 差分時間（例: "01:00"）
+ */
+function calculateTimeDifference(startTime, endTime) {
+  // 時間と分を分割
+  var startParts = startTime.split(':');
+  var endParts = endTime.split(':');
+  
+  // 分単位に変換
+  var startMinutes = parseInt(startParts[0], 10) * 60 + parseInt(startParts[1], 10);
+  var endMinutes = parseInt(endParts[0], 10) * 60 + parseInt(endParts[1], 10);
+  
+  // 差分を計算
+  var diffMinutes = endMinutes - startMinutes;
+  
+  // マイナスの場合は翌日を考慮
+  if (diffMinutes < 0) {
+    diffMinutes += 24 * 60; // 24時間を加算
+  }
+  
+  // 差分を「HH:mm」形式に変換
+  var hours = Math.floor(diffMinutes / 60);
+  var minutes = diffMinutes % 60;
+  
+  // 2桁表示にする
+  var formattedHours = ('0' + hours).slice(-2);
+  var formattedMinutes = ('0' + minutes).slice(-2);
+  
+  return formattedHours + ':' + formattedMinutes;
+}
+
+// 使用例
+function testTimeDifference() {
+  var start = '14:00';
+  var end = '15:00';
+  var difference = calculateTimeDifference(start, end);
+  Logger.log(difference); // 出力: "01:00"
+  
+  // 追加の例（翌日にまたがる場合）
+  var start2 = '23:30';
+  var end2 = '01:15';
+  var difference2 = calculateTimeDifference(start2, end2);
+  Logger.log(difference2); // 出力: "01:45"
+}
