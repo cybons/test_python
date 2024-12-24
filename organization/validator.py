@@ -6,7 +6,8 @@ class Validator:
     def __init__(self, system_data: pd.DataFrame):
         self.system_data = system_data  # システムデータ (DataFrame)
         self.errors: List[Tuple[int, str, str]] = []  # エラーを蓄積するリスト
-        self.org_name_pattern = re.compile(r'[ぁ-んァ-ヶ]')  # 組織名に全角かなを検出する正規表現
+        # 組織名に全角カナ、全角記号、全角アルファベットを検出する正規表現
+        self.org_name_pattern = re.compile(r'[ァ-ンＡ-Ｚａ-ｚ\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF60]')
 
         # システムデータのユーザーIDと名前の辞書を事前に作成
         self.system_data_dict = self.system_data.set_index('user_id')['name'].to_dict()
