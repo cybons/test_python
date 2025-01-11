@@ -1,0 +1,15 @@
+version: "3.9"
+# services:
+#     app:
+#       image: my-python-app
+#       working_dir: /app/src
+#       volumes:
+#         - ./:/app
+      # command: ["python", "main.py"]
+services:
+  app:
+    image: my-python-app
+    volumes:
+      - .:/workspace
+    tty: true
+    stdin_open: true
