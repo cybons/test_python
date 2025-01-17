@@ -1,7 +1,7 @@
 # flexible_filter.py
 """
 組織の類似度判定を行うためのフィルタリングモジュール。
-複雑な条件の組み合わせと、時系列データの比較に対応します。
+フラグの管理と処理順序を明確にした実装です。
 """
 
 from dataclasses import dataclass
@@ -10,15 +10,7 @@ import pandas as pd
 
 @dataclass
 class RuleCondition:
-    """
-    フィルタリングルールの個別条件を表すデータクラス
-    
-    Attributes:
-        field: str - 判定対象のフィールド名
-        operator: str - 演算子
-        value: any - 比較値
-        secondary_field: str | None - 比較対象の2つ目のフィールド（移動率などの計算時に使用）
-    """
+    """フィルタリングルールの個別条件を表すデータクラス"""
     field: str
     operator: str
     value: any
@@ -26,172 +18,140 @@ class RuleCondition:
 
 @dataclass
 class FilterRule:
-    """
-    フィルタリングルールを表すデータクラス
-    
-    Attributes:
-        rule_id: str - ルールの一意識別子
-        name: str - ルールの名前
-        description: str - ルールの説明
-        conditions: list[RuleCondition] - 条件のリスト
-        action: str - ルールが適用された時のアクション（"mark_similar" | "exclude" など）
-    """
+    """フィルタリングルールを表すデータクラス"""
     rule_id: str
     name: str
     description: str
     conditions: list[RuleCondition]
     action: str
+    priority: int  # ルールの優先順位（低い数字が高優先）
 
 class FlexibleOrganizationFilter:
     """
     組織の類似度を判定する柔軟なフィルタリングクラス
+    
+    フラグの説明：
+    - is_similar: 組織の類似性が確認されたペア
+    - is_excluded: 評価対象から除外するペア（同一組織の他の組み合わせなど）
+    - needs_review: 自動判定できずレビューが必要なペア
     """
     
     def __init__(self, similarity_df: pd.DataFrame):
-        """
-        Parameters:
-            similarity_df: pd.DataFrame - 類似度計算結果のDataFrame
-        """
         self.df = similarity_df.copy()
         self.rules: list[FilterRule] = []
         self._initialize_operators()
         self._initialize_fields()
         
-    def _initialize_operators(self):
-        """演算子とその実装を初期化"""
-        self.operators = {
-            ">=": lambda x, y: x >= y,
-            ">": lambda x, y: x > y,
-            "<=": lambda x, y: x <= y,
-            "<": lambda x, y: x < y,
-            "==": lambda x, y: x == y,
-            "!=": lambda x, y: x != y,
-            "in": lambda x, y: x in y,
-            "between": lambda x, y: y[0] <= x <= y[1],
-            "ratio_gte": self._calculate_ratio_gte,
-        }
-        
-    def _initialize_fields(self):
-        """計算フィールドの定義を初期化"""
-        self.field_calculators = {
-            "movement_rate": self._calculate_movement_rate,
-            "group_movement_rate": self._calculate_group_movement_rate,
-            "rank_distance": self._calculate_rank_distance,
-        }
-    
     def add_rule(self, rule: FilterRule):
-        """
-        フィルタリングルールを追加
-        
-        Parameters:
-            rule: FilterRule - 追加するルール
-        """
+        """ルールを追加し、優先順位でソート"""
         self.rules.append(rule)
-    
-    def _calculate_ratio_gte(self, value: float, threshold: float, secondary_value: float = None) -> bool:
-        """
-        比率が閾値以上かどうかを判定
-        
-        Parameters:
-            value: float - 分子となる値
-            threshold: float - 閾値
-            secondary_value: float - 分母となる値
-        """
-        if secondary_value is None or secondary_value == 0:
-            return False
-        return (value / secondary_value) >= threshold
-    
-    def _calculate_movement_rate(self, row: pd.Series) -> float:
-        """
-        メンバーの移動率を計算
-        
-        Parameters:
-            row: pd.Series - データフレームの1行
-        """
-        return row["intersection_size"] / row["num_users_df1"] * 100
-    
-    def _calculate_group_movement_rate(self, row: pd.Series) -> float:
-        """
-        グループ内の移動率を計算
-        
-        Parameters:
-            row: pd.Series - データフレームの1行
-        """
-        total_users = (row["num_users_df1"] + row["num_users_df2"]) / 2
-        return row["intersection_size"] / total_users * 100 if total_users > 0 else 0
-    
-    def _calculate_rank_distance(self, row: pd.Series) -> int:
-        """
-        組織ランクの距離を計算
-        
-        Parameters:
-            row: pd.Series - データフレームの1行
-        """
-        return abs(row["org_rank_df1"] - row["org_rank_df2"])
-    
-    def _evaluate_condition(self, row: pd.Series, condition: RuleCondition) -> bool:
-        """
-        単一の条件を評価
-        
-        Parameters:
-            row: pd.Series - データフレームの1行
-            condition: RuleCondition - 評価する条件
-        """
-        # 計算フィールドの処理
-        if condition.field in self.field_calculators:
-            field_value = self.field_calculators[condition.field](row)
-        else:
-            field_value = row[condition.field]
-            
-        # 演算子による評価
-        operator_func = self.operators[condition.operator]
-        if condition.secondary_field:
-            secondary_value = row[condition.secondary_field]
-            return operator_func(field_value, condition.value, secondary_value)
-        else:
-            return operator_func(field_value, condition.value)
-    
-    def _evaluate_rule(self, row: pd.Series, rule: FilterRule) -> bool:
-        """
-        ルールのすべての条件を評価
-        
-        Parameters:
-            row: pd.Series - データフレームの1行
-            rule: FilterRule - 評価するルール
-        """
-        return all(self._evaluate_condition(row, condition) for condition in rule.conditions)
+        self.rules.sort(key=lambda x: x.priority)  # 優先順位でソート
     
     def apply_rules(self) -> pd.DataFrame:
         """
         すべてのルールを適用してフィルタリングを実行
         
+        処理順序：
+        1. 基本的なフィルタリング（ユーザー数3人未満の除外など）
+        2. 優先順位順にルールを適用
+        3. 類似組織の他の組み合わせを除外
+        4. needs_reviewフラグの設定
+        
         Returns:
             pd.DataFrame - フィルタリング結果を含むDataFrame
         """
-        # 結果格納用の列を初期化
+        # フラグの初期化
         self.df["is_similar"] = False
-        self.df["matched_rules"] = ""
         self.df["is_excluded"] = False
+        self.df["needs_review"] = False
+        self.df["matched_rules"] = ""
         
-        # 各行に対してすべてのルールを評価
-        for _, row in self.df.iterrows():
-            for rule in self.rules:
-                if self._evaluate_rule(row, rule):
-                    if rule.action == "mark_similar":
-                        self.df.at[_, "is_similar"] = True
-                        self.df.at[_, "matched_rules"] = (
-                            f"{self.df.at[_, 'matched_rules']},{rule.rule_id}" 
-                            if self.df.at[_, "matched_rules"] 
-                            else rule.rule_id
-                        )
-                    elif rule.action == "exclude":
-                        self.df.at[_, "is_excluded"] = True
-                        
+        # 基本的なフィルタリング
+        self._apply_basic_filters()
+        
+        # ルールの適用（優先順位順）
+        filtered_df = self.df[~self.df["is_excluded"]].copy()
+        for rule in self.rules:
+            self._apply_single_rule(filtered_df, rule)
+            # 類似組織が見つかった場合、その組織の他の組み合わせを除外
+            if rule.action == "mark_similar":
+                self._exclude_related_pairs()
+            # フィルタリング対象を更新
+            filtered_df = self.df[
+                ~self.df["is_excluded"] & ~self.df["is_similar"]
+            ].copy()
+        
+        # needs_reviewフラグの設定
+        # - is_excludedでなく
+        # - is_similarでもない組織ペアがレビュー対象
+        self.df["needs_review"] = (
+            ~self.df["is_excluded"] & ~self.df["is_similar"]
+        )
+        
         return self.df
+    
+    def _apply_basic_filters(self):
+        """基本的なフィルタリングルールの適用"""
+        # 最小ユーザー数のチェック
+        min_users_mask = (
+            (self.df["num_users_df1"] < 3) | (self.df["num_users_df2"] < 3)
+        )
+        self.df.loc[min_users_mask, "is_excluded"] = True
+    
+    def _apply_single_rule(self, filtered_df: pd.DataFrame, rule: FilterRule):
+        """単一のルールを適用"""
+        for _, row in filtered_df.iterrows():
+            if self._evaluate_rule(row, rule):
+                if rule.action == "mark_similar":
+                    self.df.at[_, "is_similar"] = True
+                    # マッチしたルールを記録
+                    current_rules = self.df.at[_, "matched_rules"]
+                    self.df.at[_, "matched_rules"] = (
+                        f"{current_rules},{rule.rule_id}"
+                        if current_rules
+                        else rule.rule_id
+                    )
+                elif rule.action == "exclude":
+                    self.df.at[_, "is_excluded"] = True
+    
+    def _exclude_related_pairs(self):
+        """
+        類似組織として判定されたペアに関連する他の組み合わせを除外
+        
+        例：A-B が類似組織と判定された場合
+        - A-C, A-D など、Aが含まれる他のペア
+        - B-C, B-D など、Bが含まれる他のペア
+        をis_excluded=Trueに設定
+        """
+        # 類似組織として判定されたペアを取得
+        similar_pairs = self.df[self.df["is_similar"]]
+        
+        for _, row in similar_pairs.iterrows():
+            # 組織Xに関連する他のペアを除外
+            org_x_mask = (
+                (self.df["org_hierarchy_x"] == row["org_hierarchy_x"])
+                | (self.df["org_hierarchy_y"] == row["org_hierarchy_x"])
+            )
+            # 組織Yに関連する他のペアを除外
+            org_y_mask = (
+                (self.df["org_hierarchy_x"] == row["org_hierarchy_y"])
+                | (self.df["org_hierarchy_y"] == row["org_hierarchy_y"])
+            )
+            
+            # 既に類似判定されているペアは除外対象から除く
+            exclude_mask = (
+                (org_x_mask | org_y_mask)
+                & ~self.df["is_similar"]
+            )
+            
+            self.df.loc[exclude_mask, "is_excluded"] = True
+    
+    # その他のメソッド（_initialize_operators, _initialize_fields, _evaluate_condition, _evaluate_rule）は
+    # 前回のコードと同じため省略
 
 # 使用例
 def create_sample_rules() -> list[FilterRule]:
-    """サンプルルールを作成"""
+    """優先順位付きのサンプルルールを作成"""
     rules = [
         FilterRule(
             rule_id="RULE1",
@@ -204,7 +164,8 @@ def create_sample_rules() -> list[FilterRule]:
                 RuleCondition("group_movement_rate", ">=", 50),
                 RuleCondition("rank_distance", "==", 0),
             ],
-            action="mark_similar"
+            action="mark_similar",
+            priority=1  # 最優先
         ),
         FilterRule(
             rule_id="RULE2",
@@ -218,30 +179,9 @@ def create_sample_rules() -> list[FilterRule]:
                 RuleCondition("intersection_size", ">=", 3),
                 RuleCondition("rank_distance", "==", 0),
             ],
-            action="mark_similar"
+            action="mark_similar",
+            priority=2
         ),
         # 他のルールも同様に定義可能
     ]
     return rules
-
-if __name__ == "__main__":
-    # サンプルデータの作成
-    data = {
-        "org_hierarchy_x": ["A", "B", "C"],
-        "org_hierarchy_y": ["A'", "B'", "C'"],
-        "num_users_df1": [4, 10, 2],
-        "num_users_df2": [4, 8, 2],
-        "intersection_size": [3, 7, 2],
-        "org_rank_df1": [2, 3, 1],
-        "org_rank_df2": [2, 3, 1],
-    }
-    
-    df = pd.DataFrame(data)
-    
-    # フィルターの初期化と実行
-    filter = FlexibleOrganizationFilter(df)
-    for rule in create_sample_rules():
-        filter.add_rule(rule)
-    
-    result_df = filter.apply_rules()
-    print(result_df)
