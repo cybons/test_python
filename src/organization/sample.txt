@@ -1,0 +1,60 @@
+# エクセルルール定義ファイル構造
+
+## シート1: Rules
+
+| RuleID | Name | Description | Action | Enabled |
+|--------|------|-------------|---------|----------|
+| RULE1 | 小規模組織の移動 | ユーザー数3-5人の小規模組織の移動ルール | mark_similar | TRUE |
+| RULE2 | 大規模な移動 | 70%以上のメンバーが移動するケース | mark_similar | TRUE |
+| RULE3 | 超小規模組織 | 2-3人規模の組織の移動 | mark_similar | TRUE |
+| RULE4 | 組織名一致なし | 組織名不一致の小規模組織 | mark_similar | FALSE |
+
+## シート2: Conditions
+
+| RuleID | Field | Operator | Value | SecondaryField |
+|--------|--------|----------|--------|----------------|
+| RULE1 | num_users_df1 | between | [3, 5] | |
+| RULE1 | num_users_df2 | between | [3, 5] | |
+| RULE1 | intersection_size | >= | 3 | |
+| RULE1 | group_movement_rate | >= | 50 | |
+| RULE1 | rank_distance | == | 0 | |
+| RULE2 | num_users_df1 | >= | 3 | |
+| RULE2 | num_users_df2 | >= | 3 | |
+| RULE2 | movement_rate | >= | 70 | |
+| RULE2 | group_movement_rate | >= | 50 | |
+| RULE2 | intersection_size | >= | 3 | |
+| RULE2 | rank_distance | == | 0 | |
+| RULE3 | num_users_df1 | between | [2, 3] | |
+| RULE3 | num_users_df2 | between | [2, 3] | |
+| RULE3 | intersection_size | between | [2, 3] | |
+| RULE3 | rank_distance | == | 0 | |
+| RULE4 | num_users_df1 | < | 3 | |
+| RULE4 | num_users_df2 | < | 3 | |
+| RULE4 | same_org_name | == | false | |
+| RULE4 | rank_distance | == | 0 | |
+
+## シート3: Operators (参照用)
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| >= | 以上 | field >= value |
+| > | より大きい | field > value |
+| <= | 以下 | field <= value |
+| < | より小さい | field < value |
+| == | 等しい | field == value |
+| != | 等しくない | field != value |
+| in | 含まれる | field in list |
+| between | 範囲内 | field between [min, max] |
+| ratio_gte | 比率が閾値以上 | ratio_gte(field, threshold, secondary_field) |
+
+## シート4: Fields (参照用)
+
+| Field | Description | Type | Calculation |
+|-------|-------------|------|-------------|
+| num_users_df1 | 過去のユーザー数 | int | - |
+| num_users_df2 | 現在のユーザー数 | int | - |
+| intersection_size | 共通ユーザー数 | int | - |
+| movement_rate | メンバーの移動率 | float | intersection_size / num_users_df1 * 100 |
+| group_movement_rate | グループ内の移動率 | float | intersection_size / ((num_users_df1 + num_users_df2) / 2) * 100 |
+| rank_distance | 組織ランクの距離 | int | abs(org_rank_df1 - org_rank_df2) |
+| same_org_name | 組織名の一致 | bool | org_hierarchy_x == org_hierarchy_y |
