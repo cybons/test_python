@@ -71,18 +71,39 @@ def _exclude_by_rank_difference(self):
         pair_count = rank_data[("jaccard_index", "count")]
         
         # ペア数が少ない場合は慎重に判断
-        if pair_count < 5:
-            rank_threshold = 0.1  # 低い閾値を使用
+        if pair_count < self.thresholds.min_pair_count:
+            rank_threshold = self.thresholds.rank_min_threshold
         else:
             # ランクが上がるごとに要求される類似度の閾値を下げる
-            rank_threshold = max(0.1, jaccard_threshold * (1 - rank * 0.2))
+            rank_threshold = max(
+                self.thresholds.rank_min_threshold,
+                jaccard_threshold * (1 - rank * self.thresholds.rank_decay_rate)
+            )
             
         # 平均類似度が閾値を下回る場合、そのランクのペアを除外
         if jaccard_mean < rank_threshold and cosine_mean < (rank_threshold * 1.5):
             exclude_mask |= (
                 (self.df["rank_difference_abs"] == rank) &
-                (self.df["jaccard_index"] < jaccard_mean * 1.2)  # 平均より20%高い値も許容
+                (self.df["jaccard_index"] < jaccard_mean * self.thresholds.high_percentile)
             )
     
     # 除外フラグの設定
     self.df.loc[exclude_mask & ~self.df["is_similar"], "is_excluded"] = True
+    
+    
+    
+    
+# デフォルトの閾値を使用
+filter = FlexibleOrganizationFilter(similarity_df)
+
+# カスタム閾値を設定
+custom_thresholds = SimilarityThresholds(
+    base_jaccard=0.35,         # より緩い基本閾値
+    base_cosine=0.45,
+    rank_decay_rate=0.15,      # よりゆるやかな減衰
+    rank_min_threshold=0.15,   # より高い最小閾値
+    mean_adjustment=0.75,      # より厳しい平均値調整
+    high_percentile=1.3,       # より寛容な高類似度判定
+    min_pair_count=3           # より少ないペア数でも判断
+)
+filter_custom = FlexibleOrganizationFilter(similarity_df, thresholds=custom_thresholds) 
